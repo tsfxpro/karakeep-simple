@@ -24,6 +24,8 @@
 
 - All server env vars are parsed **once** with zod in `packages/shared/config.ts` (default export `serverConfig`). Access them as `serverConfig.crawler.numWorkers` and so on, never as raw `process.env`.
 - To add an env var: add it to the zod schema, map it into the structured config object, and document it in `docs/docs/03-configuration/`.
+- Adding a client config group means updating `clientConfig` in `config.ts`, `zClientConfigSchema` (`packages/shared/types/config.ts`), and the defaults and merge in `ClientConfigProvider`. The defaults keep older servers' behavior (e.g. `archiving.actionsEnabled: true`).
+- Heavy optional SDKs (openai/ollama in `shared/inference.ts`, stripe in `routers/subscriptions.ts`, nodemailer in `trpc/email.ts`) are imported lazily on first use to keep idle memory low. Keep new optional integrations lazy too.
 - Client-safe settings are exposed through `routers/config.ts`, `ClientConfigProvider` (`packages/shared-react/providers/client-config-provider.tsx`), and `apps/web/lib/clientConfig.tsx`.
 
 ## Frontend (web)

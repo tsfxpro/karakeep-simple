@@ -14,9 +14,16 @@
 | `cli` | standalone CLI image (`node index.mjs`) |
 | `mcp` | standalone MCP server image (`node index.js`) |
 
+The `aio_builder` stage sets `MALLOC_ARENA_MAX=2` and `NODE_OPTIONS=--max-semi-space-size=2` to keep idle memory low. A user-supplied `NODE_OPTIONS` replaces the default.
+
 The s6-overlay services live in `docker/root/etc/s6-overlay/s6-rc.d/`: `init-db-migration` (oneshot) → `svc-web` + `svc-workers` (both depend on migration).
 
 `docker/chrome/` builds the `karakeep-chrome` headless-browser image used for crawling.
+
+## Publishing
+
+- `.github/workflows/docker.yml`: upstream multi-arch publishing to `ghcr.io/karakeep-app/*`. It only runs in `karakeep-app/karakeep`.
+- `.github/workflows/fork-image.yml`: forks build the `aio` target (linux/amd64) on push to `main` or `feat/**`, or by manual dispatch. It pushes to `ghcr.io/<owner>/<repo>` tagged `<branch>`, `sha-<7>` and `latest` (main only), with a registry build cache at `:build-cache`. Build images there and pull them, not on the self-hosted machine.
 
 ## Compose files
 

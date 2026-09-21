@@ -46,7 +46,7 @@ The project is a monorepo. `apps/*` are deployables, `packages/*` are shared lib
 ├── patches/                    pnpm patchedDependencies
 ├── snapshots/                  seed data snapshot (tar.gz + json)
 ├── skills/SKILL.md             agent skill for using the Karakeep CLI
-├── .github/workflows/          ci, docker, android, ios, extension, cli, mcp, sdk, chrome, pullfrog
+├── .github/workflows/          ci, docker, fork-image, android, ios, extension, cli, mcp, sdk, chrome, pullfrog
 └── .wolf/                      OpenWolf context files (not project code)
 ```
 
