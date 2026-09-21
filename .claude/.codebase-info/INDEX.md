@@ -27,7 +27,6 @@ Most business logic lives in `packages/trpc` (routers + models). The REST API, C
 
 - Read this index first, then open only the docs relevant to the task.
 - Verify paths before relying on them. The map is a guide, not a mirror.
-- Note: root `CLAUDE.md` says shadcn components are in `packages/web/components/ui`. They are actually in **`apps/web/components/ui`**.
 
 ## How to maintain this map
 

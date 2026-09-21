@@ -48,5 +48,5 @@ Optional services: Meilisearch (`MEILI_ADDR`) for search, Chrome (`BROWSER_WEB_U
 - `bookmarks.createdAt` is really `lastSavedAt` (see [database.md](database.md)).
 - React versions are pinned workspace-wide for React Native. Don't bump them in one app alone.
 - Mutations are globally blocked in demo, read-only, and degraded modes. If writes fail in dev, check `DEMO_MODE` and `DEGRADED_MODE`.
-- The shadcn components are in `apps/web/components/ui` (not `packages/web/...` as `CLAUDE.md` says).
+- Upstream `CLAUDE.md` is a symlink to `AGENTS.md`. Edit `AGENTS.md` for shared agent instructions.
 - This repo also has OpenWolf state in `.wolf/`. That is agent tooling, not app code.
