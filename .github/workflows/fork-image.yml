@@ -6,6 +6,11 @@ on:
     branches:
       - main
       - "feat/**"
+    # Doc-only pushes don't change the image (and would cancel a running build).
+    paths-ignore:
+      - ".claude/**"
+      - "docs/**"
+      - "**/*.md"
   workflow_dispatch:
 
 concurrency:
