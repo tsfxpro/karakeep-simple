@@ -19,6 +19,7 @@ import type {
   RunnerOptions,
 } from "@karakeep/shared/queueing";
 import serverConfig from "@karakeep/shared/config";
+import logger from "@karakeep/shared/logger";
 import {
   QueueRetryAfterError,
   queueOptionsEqual,
@@ -63,9 +64,29 @@ class LitequeQueueWrapper<T> implements Queue<T> {
 }
 
 class LitequeQueueClient implements QueueClient {
-  private db = buildDBClient(path.join(serverConfig.dataDir, "queue.db"), {
-    walEnabled: serverConfig.database.walMode,
-  });
+  private db = LitequeQueueClient.openDB();
+
+  private static openDB() {
+    const db = buildDBClient(path.join(serverConfig.dataDir, "queue.db"), {
+      walEnabled: serverConfig.database.walMode,
+    });
+    // liteque hard-codes a 64MB page cache; apply the configured size. Its
+    // drizzle version doesn't expose the sqlite handle publicly, so reach it
+    // through the session and skip (with a warning) if that ever changes.
+    const client = (
+      db as unknown as {
+        session?: { client?: { pragma?: (source: string) => unknown } };
+      }
+    ).session?.client;
+    if (typeof client?.pragma === "function") {
+      client.pragma(`cache_size = -${serverConfig.database.cacheSizeKb}`);
+    } else {
+      logger.warn(
+        "[liteque] Could not set the queue database cache size; using liteque's default.",
+      );
+    }
+    return db;
+  }
 
   private queues = new Map<string, LitequeQueueWrapper<unknown>>();
 

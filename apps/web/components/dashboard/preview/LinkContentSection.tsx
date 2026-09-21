@@ -226,42 +226,40 @@ export default function LinkContentSection({
                   {t("preview.reader_view")}
                 </div>
               </SelectItem>
-              <SelectItem
-                value="screenshot"
-                disabled={!bookmark.content.screenshotAssetId}
-              >
-                <div className="flex items-center">
-                  <Camera className="mr-2 h-4 w-4" />
-                  {t("common.screenshot")}
-                </div>
-              </SelectItem>
-              <SelectItem value="pdf" disabled={!bookmark.content.pdfAssetId}>
-                <div className="flex items-center">
-                  <FileText className="mr-2 h-4 w-4" />
-                  {t("common.pdf")}
-                </div>
-              </SelectItem>
-              <SelectItem
-                value="archive"
-                disabled={
-                  !bookmark.content.fullPageArchiveAssetId &&
-                  !bookmark.content.precrawledArchiveAssetId
-                }
-              >
-                <div className="flex items-center">
-                  <Archive className="mr-2 h-4 w-4" />
-                  {t("preview.archived_page")}
-                </div>
-              </SelectItem>
-              <SelectItem
-                value="video"
-                disabled={!bookmark.content.videoAssetId}
-              >
-                <div className="flex items-center">
-                  <Video className="mr-2 h-4 w-4" />
-                  {t("common.video")}
-                </div>
-              </SelectItem>
+              {/* Offline copies only show up when the bookmark has one */}
+              {bookmark.content.screenshotAssetId && (
+                <SelectItem value="screenshot">
+                  <div className="flex items-center">
+                    <Camera className="mr-2 h-4 w-4" />
+                    {t("common.screenshot")}
+                  </div>
+                </SelectItem>
+              )}
+              {bookmark.content.pdfAssetId && (
+                <SelectItem value="pdf">
+                  <div className="flex items-center">
+                    <FileText className="mr-2 h-4 w-4" />
+                    {t("common.pdf")}
+                  </div>
+                </SelectItem>
+              )}
+              {(bookmark.content.fullPageArchiveAssetId ||
+                bookmark.content.precrawledArchiveAssetId) && (
+                <SelectItem value="archive">
+                  <div className="flex items-center">
+                    <Archive className="mr-2 h-4 w-4" />
+                    {t("preview.archived_page")}
+                  </div>
+                </SelectItem>
+              )}
+              {bookmark.content.videoAssetId && (
+                <SelectItem value="video">
+                  <div className="flex items-center">
+                    <Video className="mr-2 h-4 w-4" />
+                    {t("common.video")}
+                  </div>
+                </SelectItem>
+              )}
             </SelectGroup>
           </SelectContent>
         </Select>

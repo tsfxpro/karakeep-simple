@@ -91,7 +91,16 @@ export default function BookmarkOptions({ bookmark }: { bookmark: ZBookmark }) {
   const linkId = bookmark.id;
   const { data: session } = useSession();
 
-  const demoMode = !!useClientConfig().demoMode;
+  const clientConfig = useClientConfig();
+  const demoMode = !!clientConfig.demoMode;
+  const archiveActionsEnabled = clientConfig.archiving.actionsEnabled;
+  const linkContent =
+    bookmark.content.type === BookmarkTypes.LINK ? bookmark.content : undefined;
+  const hasOfflineCopy = !!(
+    linkContent?.fullPageArchiveAssetId ||
+    linkContent?.precrawledArchiveAssetId ||
+    linkContent?.pdfAssetId
+  );
 
   // Check if the current user owns this bookmark
   const isOwner = session?.user?.id === bookmark.userId;
@@ -350,13 +359,14 @@ export default function BookmarkOptions({ bookmark }: { bookmark: ZBookmark }) {
       id: "offline-copies",
       title: t("actions.offline_copies"),
       icon: <Archive className="mr-2 size-4" />,
-      visible: isOwner && bookmark.content.type === BookmarkTypes.LINK,
+      visible:
+        isOwner && !!linkContent && (archiveActionsEnabled || hasOfflineCopy),
       items: [
         {
           id: "download-full-page",
           title: t("actions.preserve_offline_archive"),
           icon: <FileDown className="mr-2 size-4" />,
-          visible: true,
+          visible: archiveActionsEnabled,
           disabled: demoMode,
           onClick: () => {
             fullPageArchiveBookmarkMutator.mutate({
@@ -369,7 +379,7 @@ export default function BookmarkOptions({ bookmark }: { bookmark: ZBookmark }) {
           id: "preserve-pdf",
           title: t("actions.preserve_as_pdf"),
           icon: <FileText className="mr-2 size-4" />,
-          visible: true,
+          visible: archiveActionsEnabled,
           disabled: demoMode,
           onClick: () => {
             preservePdfMutator.mutate({

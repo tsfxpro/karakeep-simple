@@ -2,7 +2,7 @@
 
 import { TRPCError } from "@trpc/server";
 import { count, eq, sum } from "drizzle-orm";
-import Stripe from "stripe";
+import type Stripe from "stripe";
 import { z } from "zod";
 
 import { assets, bookmarks, subscriptions, users } from "@karakeep/db/schema";
@@ -18,14 +18,26 @@ import {
   createScopedAuthedProcedure,
 } from "../index";
 
-const stripe = serverConfig.stripe.secretKey
-  ? new Stripe(serverConfig.stripe.secretKey, {
-      // @ts-expect-error overrides the pinned API version
-      apiVersion: "2025-06-30.basil; managed_payments_preview=v1",
-    })
-  : null;
+// The Stripe SDK is large, so it's only loaded once it's actually needed.
+let stripePromise: Promise<Stripe> | undefined;
 
-function requireStripeConfig() {
+async function getStripe(): Promise<Stripe | null> {
+  const secretKey = serverConfig.stripe.secretKey;
+  if (!secretKey) {
+    return null;
+  }
+  stripePromise ??= import("stripe").then(
+    ({ default: StripeClient }) =>
+      new StripeClient(secretKey, {
+        // @ts-expect-error overrides the pinned API version
+        apiVersion: "2025-06-30.basil; managed_payments_preview=v1",
+      }),
+  );
+  return stripePromise;
+}
+
+async function requireStripeConfig() {
+  const stripe = await getStripe();
   if (!stripe || !serverConfig.stripe.priceId) {
     throw new TRPCError({
       code: "PRECONDITION_FAILED",
@@ -103,6 +115,7 @@ export async function syncStripeDataToDatabase(
       "stripe.customer_id": customerId,
     });
 
+    const stripe = await getStripe();
     if (!stripe) {
       throw new Error("Stripe is not configured");
     }
@@ -374,6 +387,7 @@ export const subscriptionsRouter = router({
   }),
 
   getSubscriptionPrice: subscriptionsProcedure.query(async () => {
+    const stripe = await getStripe();
     if (!stripe) {
       throw new TRPCError({
         code: "PRECONDITION_FAILED",
@@ -381,7 +395,7 @@ export const subscriptionsRouter = router({
       });
     }
 
-    const { priceId, yearlyPriceId } = requireStripeConfig();
+    const { priceId, yearlyPriceId } = await requireStripeConfig();
 
     const monthlyPrice = await stripe.prices.retrieve(priceId);
 
@@ -426,7 +440,7 @@ export const subscriptionsRouter = router({
       addLogFields<"subscription.checkout_started">({
         "subscription.billing_period": input.billingPeriod,
       });
-      const { stripe, priceId, yearlyPriceId } = requireStripeConfig();
+      const { stripe, priceId, yearlyPriceId } = await requireStripeConfig();
 
       const selectedPriceId =
         input.billingPeriod === "yearly" && yearlyPriceId
@@ -531,7 +545,7 @@ export const subscriptionsRouter = router({
   createPortalSession: subscriptionsProcedure
     .use(createEventLogMiddleware("subscription.portal_opened"))
     .mutation(async ({ ctx }) => {
-      const { stripe } = requireStripeConfig();
+      const { stripe } = await requireStripeConfig();
 
       const subscription = await ctx.db.query.subscriptions.findFirst({
         where: eq(subscriptions.userId, ctx.user.id),
@@ -689,6 +703,7 @@ export const subscriptionsRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
+      const stripe = await getStripe();
       if (!stripe || !serverConfig.stripe.webhookSecret) {
         throw new TRPCError({
           code: "PRECONDITION_FAILED",

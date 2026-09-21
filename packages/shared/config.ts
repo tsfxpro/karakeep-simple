@@ -122,11 +122,18 @@ const allEnv = z.object({
   CRAWLER_HEADLESS_BROWSER: stringBool("true"),
   BROWSER_WEB_URL: z.string().optional(),
   BROWSER_WEBSOCKET_URL: z.string().optional(),
+  BROWSER_CDP_URL: z.string().optional(),
   BROWSER_CONNECT_ONDEMAND: stringBool("false"),
+  BROWSER_CONNECT_TIMEOUT_SEC: z.coerce.number().min(1).default(15),
+  BROWSER_MAX_CONCURRENT_SESSIONS: z.coerce.number().int().min(1).optional(),
+  BROWSER_SESSION_BUDGET_SEC: z.coerce.number().min(1).optional(),
+  BROWSER_FALLBACK_TO_FETCH: stringBool("true"),
   BROWSER_COOKIE_PATH: z.string().optional(),
   CRAWLER_JOB_TIMEOUT_SEC: z.coerce.number().default(60),
   CRAWLER_NAVIGATE_TIMEOUT_SEC: z.coerce.number().default(30),
   CRAWLER_NUM_WORKERS: z.coerce.number().default(1),
+  CRAWLER_NUM_RETRIES: z.coerce.number().int().min(0).default(5),
+  CRAWLER_WAIT_FOR_NETWORK_IDLE: stringBool("true"),
   INFERENCE_NUM_WORKERS: z.coerce.number().default(1),
   SEARCH_NUM_WORKERS: z.coerce.number().default(1),
   SEARCH_JOB_TIMEOUT_SEC: z.coerce.number().default(30),
@@ -135,7 +142,8 @@ const allEnv = z.object({
   ASSET_PREPROCESSING_JOB_TIMEOUT_SEC: z.coerce.number().default(60),
   RULE_ENGINE_NUM_WORKERS: z.coerce.number().default(1),
   CRAWLER_DOWNLOAD_BANNER_IMAGE: stringBool("true"),
-  CRAWLER_STORE_SCREENSHOT: stringBool("true"),
+  CRAWLER_STORE_SCREENSHOT: stringBool("false"),
+  CRAWLER_SHOW_ARCHIVE_ACTIONS: stringBool("false"),
   CRAWLER_FULL_PAGE_SCREENSHOT: stringBool("false"),
   CRAWLER_STORE_PDF: stringBool("false"),
   CRAWLER_FULL_PAGE_ARCHIVE: stringBool("false"),
@@ -268,6 +276,9 @@ const allEnv = z.object({
 
   // Database configuration
   DB_WAL_MODE: stringBool("false"),
+  // SQLite page cache per connection, in KiB. Each process opens both db.db
+  // and queue.db, and the cache is never released once filled.
+  DB_CACHE_SIZE_KB: z.coerce.number().int().min(0).default(8192),
 
   // OpenTelemetry tracing configuration
   OTEL_TRACING_ENABLED: stringBool("false"),
@@ -398,15 +409,23 @@ const serverConfigSchema = allEnv.transform((val, ctx) => {
     },
     crawler: {
       numWorkers: val.CRAWLER_NUM_WORKERS,
+      numRetries: val.CRAWLER_NUM_RETRIES,
+      waitForNetworkIdle: val.CRAWLER_WAIT_FOR_NETWORK_IDLE,
       headlessBrowser: val.CRAWLER_HEADLESS_BROWSER,
       browserWebUrl: val.BROWSER_WEB_URL,
       browserWebSocketUrl: val.BROWSER_WEBSOCKET_URL,
+      browserCdpUrl: val.BROWSER_CDP_URL,
       browserConnectOnDemand: val.BROWSER_CONNECT_ONDEMAND,
+      browserConnectTimeoutSec: val.BROWSER_CONNECT_TIMEOUT_SEC,
+      browserMaxConcurrentSessions: val.BROWSER_MAX_CONCURRENT_SESSIONS,
+      browserSessionBudgetSec: val.BROWSER_SESSION_BUDGET_SEC,
+      browserFallbackToFetch: val.BROWSER_FALLBACK_TO_FETCH,
       browserCookiePath: val.BROWSER_COOKIE_PATH,
       jobTimeoutSec: val.CRAWLER_JOB_TIMEOUT_SEC,
       navigateTimeoutSec: val.CRAWLER_NAVIGATE_TIMEOUT_SEC,
       downloadBannerImage: val.CRAWLER_DOWNLOAD_BANNER_IMAGE,
       storeScreenshot: val.CRAWLER_STORE_SCREENSHOT,
+      showArchiveActions: val.CRAWLER_SHOW_ARCHIVE_ACTIONS,
       fullPageScreenshot: val.CRAWLER_FULL_PAGE_SCREENSHOT,
       storePdf: val.CRAWLER_STORE_PDF,
       fullPageArchive: val.CRAWLER_FULL_PAGE_ARCHIVE,
@@ -535,6 +554,7 @@ const serverConfigSchema = allEnv.transform((val, ctx) => {
     },
     database: {
       walMode: val.DB_WAL_MODE,
+      cacheSizeKb: val.DB_CACHE_SIZE_KB,
     },
     tracing: {
       enabled: val.OTEL_TRACING_ENABLED,
@@ -628,6 +648,14 @@ export const clientConfig = {
   },
   stripe: {
     isConfigured: serverConfig.stripe.isConfigured,
+  },
+  archiving: {
+    // Show the on-demand "preserve" actions when explicitly enabled, or when
+    // the server already archives pages automatically.
+    actionsEnabled:
+      serverConfig.crawler.showArchiveActions ||
+      serverConfig.crawler.fullPageArchive ||
+      serverConfig.crawler.storePdf,
   },
   legal: {
     termsOfServiceUrl: serverConfig.legal.termsOfServiceUrl,

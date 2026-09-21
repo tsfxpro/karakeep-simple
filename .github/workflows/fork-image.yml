@@ -1,0 +1,68 @@
+# Builds the fork's all-in-one image and pushes it to this repository's GHCR
+# namespace, so the self-hosted server only has to pull it.
+name: Build fork image
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  workflow_dispatch:
+
+concurrency:
+  group: fork-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Upstream publishes with docker.yml instead.
+    if: github.repository != 'karakeep-app/karakeep'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login to Github Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare tags
+        id: tags
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # GHCR image names must be lowercase; branch names can't contain '/'.
+          image="ghcr.io/${REPOSITORY,,}"
+          branch_tag="${REF_NAME//\//-}"
+          tags="${image}:${branch_tag},${image}:sha-${SHA::7}"
+          if [[ "${REF_NAME}" == "main" ]]; then
+            tags="${tags},${image}:latest"
+          fi
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "all=${tags}" >> "$GITHUB_OUTPUT"
+          echo "version=${branch_tag}-${SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the AIO image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          build-args: SERVER_VERSION=${{ steps.tags.outputs.version }}
+          file: docker/Dockerfile
+          target: aio
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.all }}
+          cache-from: type=registry,ref=${{ steps.tags.outputs.image }}:build-cache
+          cache-to: type=registry,mode=max,ref=${{ steps.tags.outputs.image }}:build-cache

@@ -23,6 +23,10 @@ import { setUrlHostnameFromResolvedAddress } from "@karakeep/shared/utils/url";
 import { tryCatch } from "@karakeep/shared/tryCatch";
 
 import { loadAutoconsent } from "./autoconsent";
+import {
+  createSessionLimiter,
+  shouldResolveBrowserHostname,
+} from "./browserSession";
 import { redactUrlCredentials } from "./utils";
 
 interface Cookie {
@@ -56,6 +60,10 @@ let globalCookies: Cookie[] = [];
 // Guards the interactions with the browser instance.
 // This is needed given that most of the browser APIs are async.
 const browserMutex = new Mutex();
+// Caps concurrent browser sessions across all crawler queues in this process.
+const browserSessionLimiter = createSessionLimiter(
+  serverConfig.crawler.browserMaxConcurrentSessions,
+);
 
 // Tracks active browser contexts so we can reap leaked ones.
 const activeContexts = new Map<
@@ -65,6 +73,16 @@ const activeContexts = new Map<
 
 export const CONTEXT_CLOSE_TIMEOUT_MS = 10_000;
 export const PAGE_CLOSE_TIMEOUT_MS = 5_000;
+
+/**
+ * Waits for a free browser session slot. Call the returned function once the
+ * page, context (and on-demand browser) have been closed.
+ */
+export function acquireBrowserSession(
+  abortSignal: AbortSignal,
+): Promise<() => void> {
+  return browserSessionLimiter.acquire(abortSignal);
+}
 
 export function getGlobalBrowser(): Browser | undefined {
   return globalBrowser;
@@ -161,12 +179,20 @@ function startContextReaper() {
 }
 
 export async function startBrowserInstance() {
+  const connectTimeoutMs = serverConfig.crawler.browserConnectTimeoutSec * 1000;
   if (serverConfig.crawler.browserWebSocketUrl) {
     logger.info(
       `[Crawler] Connecting to existing browser websocket address: ${redactUrlCredentials(serverConfig.crawler.browserWebSocketUrl)}`,
     );
     return await chromium.connect(serverConfig.crawler.browserWebSocketUrl, {
-      timeout: 5000,
+      timeout: connectTimeoutMs,
+    });
+  } else if (serverConfig.crawler.browserCdpUrl) {
+    logger.info(
+      `[Crawler] Connecting to browser over CDP: ${redactUrlCredentials(serverConfig.crawler.browserCdpUrl)}`,
+    );
+    return await chromium.connectOverCDP(serverConfig.crawler.browserCdpUrl, {
+      timeout: connectTimeoutMs,
     });
   } else if (serverConfig.crawler.browserWebUrl) {
     logger.info(
@@ -174,14 +200,16 @@ export async function startBrowserInstance() {
     );
 
     const webUrl = new URL(serverConfig.crawler.browserWebUrl);
-    const { address } = await dns.promises.lookup(webUrl.hostname);
-    setUrlHostnameFromResolvedAddress(webUrl, address);
-    logger.info(
-      `[Crawler] Successfully resolved IP address, new address: ${redactUrlCredentials(webUrl.toString())}`,
-    );
+    if (shouldResolveBrowserHostname(webUrl)) {
+      const { address } = await dns.promises.lookup(webUrl.hostname);
+      setUrlHostnameFromResolvedAddress(webUrl, address);
+      logger.info(
+        `[Crawler] Successfully resolved IP address, new address: ${redactUrlCredentials(webUrl.toString())}`,
+      );
+    }
 
     return await chromium.connectOverCDP(webUrl.toString(), {
-      timeout: 5000,
+      timeout: connectTimeoutMs,
     });
   } else {
     logger.info(`Running in browserless mode`);

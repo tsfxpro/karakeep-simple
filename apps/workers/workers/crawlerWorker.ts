@@ -85,16 +85,27 @@ export class CrawlerWorker {
     // that never executed JS/screenshots. Fail loudly instead. Two cases where
     // the fallback is silent: no browser is configured at all, and a
     // non-on-demand connection that failed to establish at init (globalBrowser
-    // stays undefined). On-demand connections throw per-crawl, so those surface
-    // as visible errors already.
+    // stays undefined). On-demand connections throw per-crawl only when
+    // BROWSER_FALLBACK_TO_FETCH is off, so require that too.
     const hasBrowserBackend =
       !!serverConfig.crawler.browserWebUrl ||
-      !!serverConfig.crawler.browserWebSocketUrl;
+      !!serverConfig.crawler.browserWebSocketUrl ||
+      !!serverConfig.crawler.browserCdpUrl;
     if (!hasBrowserBackend) {
       throw new Error(
         "[adhoc] No browser backend configured — refusing to run. crawlPage() " +
-          "would silently fall back to a plain HTTP fetch. Set BROWSER_WEB_URL " +
-          "or BROWSER_WEBSOCKET_URL to a reachable Chrome.",
+          "would silently fall back to a plain HTTP fetch. Set BROWSER_WEB_URL, " +
+          "BROWSER_WEBSOCKET_URL or BROWSER_CDP_URL to a reachable Chrome.",
+      );
+    }
+    if (
+      serverConfig.crawler.browserConnectOnDemand &&
+      serverConfig.crawler.browserFallbackToFetch
+    ) {
+      throw new Error(
+        "[adhoc] BROWSER_FALLBACK_TO_FETCH is enabled — refusing to run. A " +
+          "failed browser connection would silently fall back to a plain HTTP " +
+          "fetch. Set BROWSER_FALLBACK_TO_FETCH=false for adhoc crawls.",
       );
     }
     if (!serverConfig.crawler.browserConnectOnDemand && !getGlobalBrowser()) {

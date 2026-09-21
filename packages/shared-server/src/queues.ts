@@ -7,6 +7,7 @@ import {
   QueueClient,
   QueueOptions,
 } from "@karakeep/shared/queueing";
+import serverConfig from "@karakeep/shared/config";
 import { zRuleEngineEventSchema } from "@karakeep/shared/types/rules";
 
 import { loadAllPlugins } from "./plugins";
@@ -90,7 +91,7 @@ export const LinkCrawlerQueue = createDeferredQueue<ZCrawlLinkRequest>(
   "link_crawler_queue",
   {
     defaultJobArgs: {
-      numRetries: 5,
+      numRetries: serverConfig.crawler.numRetries,
     },
     keepFailedJobs: false,
   },
@@ -102,7 +103,7 @@ export const LowPriorityCrawlerQueue = createDeferredQueue<ZCrawlLinkRequest>(
   "low_priority_crawler_queue",
   {
     defaultJobArgs: {
-      numRetries: 5,
+      numRetries: serverConfig.crawler.numRetries,
     },
     keepFailedJobs: false,
   },

@@ -39,6 +39,7 @@ import {
 import {
   CONTEXT_CLOSE_TIMEOUT_MS,
   PAGE_CLOSE_TIMEOUT_MS,
+  acquireBrowserSession,
   getGlobalBlocker,
   getGlobalBrowser,
   getGlobalCookies,
@@ -47,6 +48,7 @@ import {
   trackContext,
   untrackContext,
 } from "./browser";
+import { SessionBudget } from "./browserSession";
 import { truncateUrl } from "./utils";
 
 const tracer = getTracer("@karakeep/workers");
@@ -197,12 +199,18 @@ async function installRedirectGuard(
         await failPausedRequest(event.requestId);
       }
     });
+    // Pausing at the request stage is only needed to answer proxy auth
+    // challenges. Skipping it otherwise saves a CDP round-trip per request,
+    // which adds up quickly with a remote browser.
+    const needsProxyAuth = !!(proxyConfig?.username || proxyConfig?.password);
     await cdpSession.send("Fetch.enable", {
-      handleAuthRequests: true,
-      patterns: [
-        { urlPattern: "*", requestStage: "Request" },
-        { urlPattern: "*", requestStage: "Response" },
-      ],
+      handleAuthRequests: needsProxyAuth,
+      patterns: needsProxyAuth
+        ? [
+            { urlPattern: "*", requestStage: "Request" },
+            { urlPattern: "*", requestStage: "Response" },
+          ]
+        : [{ urlPattern: "*", requestStage: "Response" }],
     });
   } catch (e) {
     logger.warn(`[Crawler][${jobId}] Failed to install redirect guard: ${e}`);
@@ -336,7 +344,17 @@ async function capturePageAssets(
   jobId: string,
   forceStorePdf: boolean,
   abortSignal: AbortSignal,
+  budget: SessionBudget,
 ): Promise<[string, Buffer | undefined, Buffer | undefined]> {
+  // Screenshots and PDFs are optional: skip them when they would push the
+  // session past its budget.
+  const assetTimeoutMs = serverConfig.crawler.screenshotTimeoutSec * 1000;
+  const assetsFitBudget = budget.fits(assetTimeoutMs);
+  if (!assetsFitBudget) {
+    logger.info(
+      `[Crawler][${jobId}] Skipping screenshot/PDF capture, not enough session budget left.`,
+    );
+  }
   return await withSpan(
     tracer,
     "crawlerWorker.crawlPage.captureAssets",
@@ -364,58 +382,58 @@ async function capturePageAssets(
         },
       );
 
-      const screenshotPromise: Promise<Buffer | undefined> = serverConfig
-        .crawler.storeScreenshot
-        ? withSpan(
-            tracer,
-            "crawlerWorker.crawlPage.captureScreenshot",
-            {
-              attributes: {
-                "job.id": jobId,
-                "asset.type": "image",
+      const screenshotPromise: Promise<Buffer | undefined> =
+        serverConfig.crawler.storeScreenshot && assetsFitBudget
+          ? withSpan(
+              tracer,
+              "crawlerWorker.crawlPage.captureScreenshot",
+              {
+                attributes: {
+                  "job.id": jobId,
+                  "asset.type": "image",
+                },
               },
-            },
-            async () => {
-              const { data: screenshotData, error: screenshotError } =
-                await tryCatch(
-                  raceWith<Buffer>(
-                    activePage.screenshot({
-                      // If you change this, you need to change the asset type in the store function.
-                      type: "jpeg",
-                      fullPage: serverConfig.crawler.fullPageScreenshot,
-                      quality: 80,
-                    }),
-                    timeoutRace<Buffer>(
-                      serverConfig.crawler.screenshotTimeoutSec * 1000,
-                      () => {
-                        throw new Error(
-                          "TIMED_OUT, consider increasing CRAWLER_SCREENSHOT_TIMEOUT_SEC",
-                        );
-                      },
+              async () => {
+                const { data: screenshotData, error: screenshotError } =
+                  await tryCatch(
+                    raceWith<Buffer>(
+                      activePage.screenshot({
+                        // If you change this, you need to change the asset type in the store function.
+                        type: "jpeg",
+                        fullPage: serverConfig.crawler.fullPageScreenshot,
+                        quality: 80,
+                      }),
+                      timeoutRace<Buffer>(
+                        serverConfig.crawler.screenshotTimeoutSec * 1000,
+                        () => {
+                          throw new Error(
+                            "TIMED_OUT, consider increasing CRAWLER_SCREENSHOT_TIMEOUT_SEC",
+                          );
+                        },
+                      ),
+                      abortRaceResolve(abortSignal, Buffer.from("")),
                     ),
-                    abortRaceResolve(abortSignal, Buffer.from("")),
-                  ),
+                  );
+                abortSignal.throwIfAborted();
+                if (screenshotError) {
+                  logger.warn(
+                    `[Crawler][${jobId}] Failed to capture the screenshot. Reason: ${screenshotError}`,
+                  );
+                  return undefined;
+                }
+                setSpanAttributes({
+                  "asset.size": screenshotData.byteLength,
+                });
+                logger.info(
+                  `[Crawler][${jobId}] Finished capturing page content and a screenshot. FullPageScreenshot: ${serverConfig.crawler.fullPageScreenshot}`,
                 );
-              abortSignal.throwIfAborted();
-              if (screenshotError) {
-                logger.warn(
-                  `[Crawler][${jobId}] Failed to capture the screenshot. Reason: ${screenshotError}`,
-                );
-                return undefined;
-              }
-              setSpanAttributes({
-                "asset.size": screenshotData.byteLength,
-              });
-              logger.info(
-                `[Crawler][${jobId}] Finished capturing page content and a screenshot. FullPageScreenshot: ${serverConfig.crawler.fullPageScreenshot}`,
-              );
-              return screenshotData;
-            },
-          )
-        : Promise.resolve(undefined);
+                return screenshotData;
+              },
+            )
+          : Promise.resolve(undefined);
 
       const pdfPromise: Promise<Buffer | undefined> =
-        serverConfig.crawler.storePdf || forceStorePdf
+        (serverConfig.crawler.storePdf || forceStorePdf) && assetsFitBudget
           ? withSpan(
               tracer,
               "crawlerWorker.crawlPage.capturePdf",
@@ -556,15 +574,26 @@ async function closePageAndContext(
           tracer,
           "crawlerWorker.crawlPage.cleanup.closeBrowser",
           { attributes: { "job.id": jobId } },
-          async () =>
-            browser
-              .close()
-              .then(() => {
-                untrackContext(jobId);
-              })
-              .catch((e: unknown) => {
-                logger.warn(`[Crawler][${jobId}] browser.close() failed: ${e}`);
-              }),
+          async () => {
+            const browserClosed = await raceWith<boolean>(
+              browser
+                .close()
+                .then(() => {
+                  untrackContext(jobId);
+                  return true;
+                })
+                .catch((e: unknown) => {
+                  logger.warn(
+                    `[Crawler][${jobId}] browser.close() failed: ${e}`,
+                  );
+                  return true;
+                }),
+              timeoutRace<boolean>(CONTEXT_CLOSE_TIMEOUT_MS, () => false),
+            );
+            if (!browserClosed) {
+              logger.warn(`[Crawler][${jobId}] browser.close() timed out`);
+            }
+          },
         );
       }
     },
@@ -614,115 +643,177 @@ export async function crawlPage(
         return browserlessCrawlPage(jobId, url, abortSignal, runProxy);
       }
 
-      const browser = await withSpan(
-        tracer,
-        "crawlerWorker.crawlPage.getBrowserInstance",
-        {
-          attributes: {
-            "job.id": jobId,
-          },
-        },
-        async () => {
-          if (serverConfig.crawler.browserConnectOnDemand) {
-            return startBrowserInstance();
-          }
-          return getGlobalBrowser();
-        },
-      );
-      if (!browser) {
-        return browserlessCrawlPage(jobId, url, abortSignal, runProxy);
-      }
-
-      const proxyConfig = getPlaywrightProxyConfig(runProxy);
-      const isRunningInProxyContext =
-        proxyConfig !== undefined &&
-        !matchesNoProxy(url, proxyConfig.bypass?.split(",") ?? []);
-      const context = await withSpan(
-        tracer,
-        "crawlerWorker.crawlPage.createContext",
-        {
-          attributes: {
-            "job.id": jobId,
-          },
-        },
-        async () =>
-          browser.newContext({
-            viewport: { width: 1440, height: 900 },
-            userAgent:
-              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            proxy: proxyConfig,
-            serviceWorkers: "block",
-          }),
-      );
-
-      trackContext(jobId, context);
-      let page: Page | undefined;
+      const releaseSession = await acquireBrowserSession(abortSignal);
       try {
-        const globalCookies = getGlobalCookies();
-        if (globalCookies.length > 0) {
-          await context.addCookies(globalCookies);
-          logger.info(
-            `[Crawler][${jobId}] Cookies successfully loaded into browser context`,
-          );
-        }
-
-        const setup = await setupPage(context, jobId, proxyConfig, abortSignal);
-        page = setup.page;
-        const autoconsentHandle = setup.autoconsent;
-
-        // page is guaranteed to be assigned here; alias to a const for
-        // TypeScript narrowing so the rest of the try block sees `Page`.
-        const activePage = page;
-
-        // Navigate to the target URL
-        const navigationValidation = await withSpan(
-          tracer,
-          "crawlerWorker.crawlPage.validateNavigationTarget",
-          {
-            attributes: {
-              "job.id": jobId,
-              "bookmark.url": url,
-              "bookmark.domain": getBookmarkDomain(url),
-            },
-          },
-          async () => validateUrl(url, isRunningInProxyContext),
+        return await crawlPageInBrowser(
+          jobId,
+          url,
+          forceStorePdf,
+          abortSignal,
+          runProxy,
         );
-        if (!navigationValidation.ok) {
-          throw new Error(
-            `Disallowed navigation target "${truncateUrl(url)}": ${navigationValidation.reason}`,
-          );
+      } finally {
+        releaseSession();
+      }
+    },
+  );
+}
+
+/**
+ * Crawls the page with a browser session: connects (or reuses the shared
+ * connection), and fits navigation, waits and captures into the session
+ * budget when one is configured.
+ */
+async function crawlPageInBrowser(
+  jobId: string,
+  url: string,
+  forceStorePdf: boolean,
+  abortSignal: AbortSignal,
+  runProxy: RunProxyConfig,
+): Promise<CrawlPageResult> {
+  const { data: browser, error: connectError } = await tryCatch(
+    withSpan(
+      tracer,
+      "crawlerWorker.crawlPage.getBrowserInstance",
+      {
+        attributes: {
+          "job.id": jobId,
+        },
+      },
+      async () => {
+        if (serverConfig.crawler.browserConnectOnDemand) {
+          return startBrowserInstance();
         }
-        const targetUrl = navigationValidation.url.toString();
-        logger.info(`[Crawler][${jobId}] Navigating to "${targetUrl}"`);
-        const response = await withSpan(
-          tracer,
-          "crawlerWorker.crawlPage.navigate",
-          {
-            attributes: {
-              "job.id": jobId,
-              "bookmark.url": targetUrl,
-              "bookmark.domain": getBookmarkDomain(targetUrl),
-            },
-          },
-          async () =>
-            raceWith(
-              activePage.goto(targetUrl, {
-                timeout: serverConfig.crawler.navigateTimeoutSec * 1000,
-                waitUntil: "domcontentloaded",
-              }),
-              abortRaceResolve(abortSignal, null),
+        return getGlobalBrowser();
+      },
+    ),
+  );
+  if (connectError) {
+    if (!serverConfig.crawler.browserFallbackToFetch) {
+      throw connectError;
+    }
+    logger.warn(
+      `[Crawler][${jobId}] Failed to connect to the browser, falling back to a plain fetch: ${connectError}`,
+    );
+    return browserlessCrawlPage(jobId, url, abortSignal, runProxy);
+  }
+  if (!browser) {
+    return browserlessCrawlPage(jobId, url, abortSignal, runProxy);
+  }
+  // The session budget counts from the moment we hold a browser session.
+  const budget = new SessionBudget(
+    serverConfig.crawler.browserSessionBudgetSec,
+  );
+
+  const proxyConfig = getPlaywrightProxyConfig(runProxy);
+  const isRunningInProxyContext =
+    proxyConfig !== undefined &&
+    !matchesNoProxy(url, proxyConfig.bypass?.split(",") ?? []);
+  const { data: context, error: contextError } = await tryCatch(
+    withSpan(
+      tracer,
+      "crawlerWorker.crawlPage.createContext",
+      {
+        attributes: {
+          "job.id": jobId,
+        },
+      },
+      async () =>
+        browser.newContext({
+          viewport: { width: 1440, height: 900 },
+          userAgent:
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          proxy: proxyConfig,
+          serviceWorkers: "block",
+        }),
+    ),
+  );
+  if (contextError) {
+    // Don't leave an on-demand (possibly remote, billed) session open.
+    if (serverConfig.crawler.browserConnectOnDemand) {
+      await browser.close().catch(() => {
+        // Ignore errors — the browser may already be disconnected.
+      });
+    }
+    throw contextError;
+  }
+
+  trackContext(jobId, context);
+  let page: Page | undefined;
+  try {
+    const globalCookies = getGlobalCookies();
+    if (globalCookies.length > 0) {
+      await context.addCookies(globalCookies);
+      logger.info(
+        `[Crawler][${jobId}] Cookies successfully loaded into browser context`,
+      );
+    }
+
+    const setup = await setupPage(context, jobId, proxyConfig, abortSignal);
+    page = setup.page;
+    const autoconsentHandle = setup.autoconsent;
+
+    // page is guaranteed to be assigned here; alias to a const for
+    // TypeScript narrowing so the rest of the try block sees `Page`.
+    const activePage = page;
+
+    // Navigate to the target URL
+    const navigationValidation = await withSpan(
+      tracer,
+      "crawlerWorker.crawlPage.validateNavigationTarget",
+      {
+        attributes: {
+          "job.id": jobId,
+          "bookmark.url": url,
+          "bookmark.domain": getBookmarkDomain(url),
+        },
+      },
+      async () => validateUrl(url, isRunningInProxyContext),
+    );
+    if (!navigationValidation.ok) {
+      throw new Error(
+        `Disallowed navigation target "${truncateUrl(url)}": ${navigationValidation.reason}`,
+      );
+    }
+    const targetUrl = navigationValidation.url.toString();
+    logger.info(`[Crawler][${jobId}] Navigating to "${targetUrl}"`);
+    const response = await withSpan(
+      tracer,
+      "crawlerWorker.crawlPage.navigate",
+      {
+        attributes: {
+          "job.id": jobId,
+          "bookmark.url": targetUrl,
+          "bookmark.domain": getBookmarkDomain(targetUrl),
+        },
+      },
+      async () =>
+        raceWith(
+          activePage.goto(targetUrl, {
+            timeout: budget.navigationTimeoutMs(
+              serverConfig.crawler.navigateTimeoutSec * 1000,
             ),
-        );
-        setSpanAttributes({
-          "crawler.statusCode": response?.status() ?? 0,
-        });
+            waitUntil: "domcontentloaded",
+          }),
+          abortRaceResolve(abortSignal, null),
+        ),
+    );
+    setSpanAttributes({
+      "crawler.statusCode": response?.status() ?? 0,
+    });
 
-        logger.info(
-          `[Crawler][${jobId}] Successfully navigated to "${targetUrl}". Waiting for the page to load ...`,
-        );
+    logger.info(
+      `[Crawler][${jobId}] Successfully navigated to "${targetUrl}". Waiting for the page to load ...`,
+    );
 
-        // Wait until network is relatively idle or timeout after 5 seconds
-        const pageLoad = withSpan(
+    // Wait until network is relatively idle or timeout after 5 seconds.
+    // Skipped when disabled or when it would eat into the capture reserve.
+    const networkIdleWaitMs = 5000;
+    const waitForNetworkIdle =
+      serverConfig.crawler.waitForNetworkIdle && budget.fits(networkIdleWaitMs);
+    const pageLoad = !waitForNetworkIdle
+      ? Promise.resolve()
+      : withSpan(
           tracer,
           "crawlerWorker.crawlPage.waitForLoadState",
           {
@@ -735,43 +826,43 @@ export async function crawlPage(
           async () => {
             await raceWith<unknown>(
               activePage
-                .waitForLoadState("networkidle", { timeout: 5000 })
+                .waitForLoadState("networkidle", { timeout: networkIdleWaitMs })
                 .catch(() => ({})),
-              timeoutRace<unknown>(5000, () => undefined),
+              timeoutRace<unknown>(networkIdleWaitMs, () => undefined),
               abortRace(abortSignal),
             );
           },
         );
 
-        await waitForPageLoadAndAutoconsent(
-          pageLoad,
-          autoconsentHandle,
-          abortSignal,
-        );
+    // Autoconsent can wait twice for consent dialogs; skip those waits when
+    // the session budget is too tight for them.
+    const autoconsentWaitMs = 6000;
+    await waitForPageLoadAndAutoconsent(
+      pageLoad,
+      budget.fits(autoconsentWaitMs) ? autoconsentHandle : undefined,
+      abortSignal,
+    );
 
-        abortSignal.throwIfAborted();
+    abortSignal.throwIfAborted();
 
-        logger.info(
-          `[Crawler][${jobId}] Finished waiting for the page to load.`,
-        );
+    logger.info(`[Crawler][${jobId}] Finished waiting for the page to load.`);
 
-        const [htmlContent, screenshot, pdf] = await capturePageAssets(
-          activePage,
-          jobId,
-          forceStorePdf,
-          abortSignal,
-        );
+    const [htmlContent, screenshot, pdf] = await capturePageAssets(
+      activePage,
+      jobId,
+      forceStorePdf,
+      abortSignal,
+      budget,
+    );
 
-        return {
-          htmlContent,
-          statusCode: response?.status() ?? 0,
-          screenshot,
-          pdf,
-          url: activePage.url(),
-        };
-      } finally {
-        await closePageAndContext(page, context, browser, jobId);
-      }
-    },
-  );
+    return {
+      htmlContent,
+      statusCode: response?.status() ?? 0,
+      screenshot,
+      pdf,
+      url: activePage.url(),
+    };
+  } finally {
+    await closePageAndContext(page, context, browser, jobId);
+  }
 }

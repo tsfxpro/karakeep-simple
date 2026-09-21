@@ -1,7 +1,7 @@
-import { Ollama } from "ollama";
-import OpenAI from "openai";
-import { zodResponseFormat } from "openai/helpers/zod";
-import * as undici from "undici";
+// The SDKs are loaded on first use so that processes that never run
+// inference don't pay for them in memory.
+import type { Ollama } from "ollama";
+import type OpenAI from "openai";
 import { z } from "zod";
 
 import serverConfig from "./config";
@@ -150,7 +150,7 @@ const mapInferenceOutputSchema = <
   return opts[type];
 };
 
-const mapOpenAIResponseFormat = (
+const mapOpenAIResponseFormat = async (
   schema: z.ZodSchema | null,
   outputSchema: typeof serverConfig.inference.outputSchema,
 ) => {
@@ -158,14 +158,16 @@ const mapOpenAIResponseFormat = (
     return undefined;
   }
 
-  return mapInferenceOutputSchema(
-    {
-      structured: zodResponseFormat(schema, "schema"),
-      json: { type: "json_object" as const },
-      plain: undefined,
-    },
-    outputSchema,
-  );
+  switch (outputSchema) {
+    case "structured": {
+      const { zodResponseFormat } = await import("openai/helpers/zod");
+      return zodResponseFormat(schema, "schema");
+    }
+    case "json":
+      return { type: "json_object" as const };
+    case "plain":
+      return undefined;
+  }
 };
 
 export interface OpenAIInferenceConfig {
@@ -190,8 +192,16 @@ export interface OpenAIEmbeddingConfig {
   timeoutSec?: number;
 }
 
-const buildOpenAIClient = (config: OpenAIEmbeddingConfig) =>
-  new OpenAI({
+const buildOpenAIClient = async (
+  config: OpenAIEmbeddingConfig,
+): Promise<OpenAI> => {
+  const { default: OpenAIClient } = await import("openai");
+  let dispatcher;
+  if (config.proxyUrl) {
+    const undici = await import("undici");
+    dispatcher = new undici.ProxyAgent(config.proxyUrl);
+  }
+  return new OpenAIClient({
     apiKey: config.apiKey,
     baseURL: config.baseURL,
     timeout:
@@ -200,10 +210,9 @@ const buildOpenAIClient = (config: OpenAIEmbeddingConfig) =>
       "X-Title": "Karakeep",
       "HTTP-Referer": "https://karakeep.app",
     },
-    fetchOptions: config.proxyUrl
-      ? { dispatcher: new undici.ProxyAgent(config.proxyUrl) }
-      : undefined,
+    fetchOptions: dispatcher ? { dispatcher } : undefined,
   });
+};
 
 export class InferenceClientFactory {
   static build(): InferenceClient | null {
@@ -248,16 +257,21 @@ export class EmbeddingClientFactory {
 }
 
 export class OpenAIEmbeddingClient implements EmbeddingClient {
-  private openAI: OpenAI;
+  private openAIPromise: Promise<OpenAI> | undefined;
 
-  constructor(config: OpenAIEmbeddingConfig) {
-    this.openAI = buildOpenAIClient(config);
+  constructor(private readonly config: OpenAIEmbeddingConfig) {}
+
+  private get openAI(): Promise<OpenAI> {
+    this.openAIPromise ??= buildOpenAIClient(this.config);
+    return this.openAIPromise;
   }
 
   async generateEmbeddingFromText(
     inputs: string[],
   ): Promise<EmbeddingResponse> {
-    const embedResponse = await this.openAI.embeddings.create({
+    const embedResponse = await (
+      await this.openAI
+    ).embeddings.create({
       model: serverConfig.embedding.textModel,
       input: inputs,
       encoding_format: "float",
@@ -275,13 +289,16 @@ export class OpenAIEmbeddingClient implements EmbeddingClient {
 }
 
 export class OpenAIInferenceClient implements InferenceClient {
-  openAI: OpenAI;
+  private openAIPromise: Promise<OpenAI> | undefined;
   private config: OpenAIInferenceConfig;
 
   constructor(config: OpenAIInferenceConfig) {
     this.config = config;
+  }
 
-    this.openAI = buildOpenAIClient(config);
+  private get openAI(): Promise<OpenAI> {
+    this.openAIPromise ??= buildOpenAIClient(this.config);
+    return this.openAIPromise;
   }
 
   static fromConfig(): OpenAIInferenceClient {
@@ -309,7 +326,9 @@ export class OpenAIInferenceClient implements InferenceClient {
       ...defaultInferenceOptions,
       ..._opts,
     };
-    const chatCompletion = await this.openAI.chat.completions.create(
+    const chatCompletion = await (
+      await this.openAI
+    ).chat.completions.create(
       {
         messages: [{ role: "user", content: prompt }],
         model: this.config.textModel,
@@ -319,7 +338,7 @@ export class OpenAIInferenceClient implements InferenceClient {
         ...(this.config.useMaxCompletionTokens
           ? { max_completion_tokens: this.config.maxOutputTokens }
           : { max_tokens: this.config.maxOutputTokens }),
-        response_format: mapOpenAIResponseFormat(
+        response_format: await mapOpenAIResponseFormat(
           optsWithDefaults.schema,
           this.config.outputSchema,
         ),
@@ -347,7 +366,9 @@ export class OpenAIInferenceClient implements InferenceClient {
       ...defaultInferenceOptions,
       ..._opts,
     };
-    const chatCompletion = await this.openAI.chat.completions.create(
+    const chatCompletion = await (
+      await this.openAI
+    ).chat.completions.create(
       {
         model: this.config.imageModel,
         ...(this.config.serviceTier
@@ -356,7 +377,7 @@ export class OpenAIInferenceClient implements InferenceClient {
         ...(this.config.useMaxCompletionTokens
           ? { max_completion_tokens: this.config.maxOutputTokens }
           : { max_tokens: this.config.maxOutputTokens }),
-        response_format: mapOpenAIResponseFormat(
+        response_format: await mapOpenAIResponseFormat(
           optsWithDefaults.schema,
           this.config.outputSchema,
         ),
@@ -392,7 +413,9 @@ export class OpenAIInferenceClient implements InferenceClient {
     inputs: string[],
   ): Promise<EmbeddingResponse> {
     const model = serverConfig.embedding.textModel;
-    const embedResponse = await this.openAI.embeddings.create({
+    const embedResponse = await (
+      await this.openAI
+    ).embeddings.create({
       model: model,
       input: inputs,
       encoding_format: "float",
@@ -420,15 +443,22 @@ export interface OllamaInferenceConfig {
 }
 
 class OllamaInferenceClient implements InferenceClient {
-  ollama: Ollama;
+  private ollamaPromise: Promise<Ollama> | undefined;
   private config: OllamaInferenceConfig;
 
   constructor(config: OllamaInferenceConfig) {
     this.config = config;
-    this.ollama = new Ollama({
-      host: config.baseUrl,
-      fetch: customFetch, // Use the custom fetch with configurable timeout
-    });
+  }
+
+  private get ollama(): Promise<Ollama> {
+    this.ollamaPromise ??= import("ollama").then(
+      ({ Ollama: OllamaClient }) =>
+        new OllamaClient({
+          host: this.config.baseUrl,
+          fetch: customFetch, // Use the custom fetch with configurable timeout
+        }),
+    );
+    return this.ollamaPromise;
   }
 
   static fromConfig(): OllamaInferenceClient {
@@ -454,14 +484,15 @@ class OllamaInferenceClient implements InferenceClient {
       ..._opts,
     };
 
+    const ollama = await this.ollama;
     let newAbortSignal = undefined;
     if (optsWithDefaults.abortSignal) {
       newAbortSignal = AbortSignal.any([optsWithDefaults.abortSignal]);
       newAbortSignal.onabort = () => {
-        this.ollama.abort();
+        ollama.abort();
       };
     }
-    const chatCompletion = await this.ollama.generate({
+    const chatCompletion = await ollama.generate({
       model: model,
       format: mapInferenceOutputSchema(
         {
@@ -553,7 +584,9 @@ class OllamaInferenceClient implements InferenceClient {
   async generateEmbeddingFromText(
     inputs: string[],
   ): Promise<EmbeddingResponse> {
-    const embedding = await this.ollama.embed({
+    const embedding = await (
+      await this.ollama
+    ).embed({
       model: serverConfig.embedding.textModel,
       input: inputs,
       // Truncate the input to fit into the model's max token limit,

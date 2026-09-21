@@ -152,6 +152,10 @@ COPY --from=monolith_builder /usr/local/cargo/bin/monolith /usr/local/bin/monoli
 
 ENV NODE_ENV production
 ENV NEXT_TELEMETRY_DISABLED=1
+# Keep idle memory low: fewer glibc malloc arenas (one per thread by default)
+# and a small V8 young generation. Setting NODE_OPTIONS yourself replaces this.
+ENV MALLOC_ARENA_MAX=2
+ENV NODE_OPTIONS="--max-semi-space-size=2"
 ENV NEXTAUTH_URL_INTERNAL=http://localhost:${PORT}
 
 COPY --from=base --chown=node:node /app/apps/web/.next/standalone ./

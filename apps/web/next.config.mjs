@@ -7,6 +7,12 @@ const withBundleAnalyzer = bundleAnalyzer({
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  // Keep idle memory low: load route modules on first request instead of at
+  // boot, and cap the in-memory data cache (default 50MB).
+  experimental: {
+    preloadEntriesOnStart: false,
+  },
+  cacheMaxMemorySize: 8 * 1024 * 1024,
   turbopack: {
     rules: {
       "*.svg": {

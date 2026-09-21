@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 interface OpenSqliteOptions {
   readOnly: boolean;
   walMode: boolean;
+  cacheSizeKb?: number;
 }
 
 export function openSqliteDatabase(
@@ -27,7 +28,7 @@ export function openSqliteDatabase(
       sqlite.pragma("journal_mode = DELETE");
     }
   }
-  sqlite.pragma("cache_size = -65536");
+  sqlite.pragma(`cache_size = -${options.cacheSizeKb ?? 65536}`);
   sqlite.pragma("foreign_keys = ON");
   sqlite.pragma("temp_store = MEMORY");
 

@@ -26,6 +26,10 @@ export const DEFAULT_CLIENT_CONFIG: ZClientConfig = {
   stripe: {
     isConfigured: false,
   },
+  // Older servers don't send this; keep their UI unchanged.
+  archiving: {
+    actionsEnabled: true,
+  },
   legal: {},
   disableNewReleaseCheck: true,
 };
@@ -64,6 +68,10 @@ export function ClientConfigProvider({
       stripe: {
         ...DEFAULT_CLIENT_CONFIG.stripe,
         ...value?.stripe,
+      },
+      archiving: {
+        ...DEFAULT_CLIENT_CONFIG.archiving,
+        ...value?.archiving,
       },
       legal: {
         ...DEFAULT_CLIENT_CONFIG.legal,

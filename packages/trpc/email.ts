@@ -1,15 +1,15 @@
-import { createTransport } from "nodemailer";
-
 import { getTracer, withSpan } from "@karakeep/shared-server";
 import serverConfig from "@karakeep/shared/config";
 import { escapeHtml } from "@karakeep/shared/utils/htmlUtils";
 
 const tracer = getTracer("@karakeep/trpc");
 
-function buildTransporter() {
+// nodemailer is only loaded when an email is actually sent.
+async function buildTransporter() {
   if (!serverConfig.email.smtp) {
     throw new Error("SMTP is not configured");
   }
+  const { createTransport } = await import("nodemailer");
   return createTransport({
     host: serverConfig.email.smtp.host,
     port: serverConfig.email.smtp.port,
@@ -24,7 +24,7 @@ function buildTransporter() {
   });
 }
 
-type Transporter = ReturnType<typeof buildTransporter>;
+type Transporter = Awaited<ReturnType<typeof buildTransporter>>;
 
 type Fn<Args extends unknown[] = unknown[]> = (
   transport: Transporter,
@@ -44,7 +44,7 @@ function withTracing<Args extends unknown[]>(
     if (options.silentFail && !serverConfig.email.smtp) {
       return;
     }
-    const transporter = buildTransporter();
+    const transporter = await buildTransporter();
     await withSpan(tracer, name, {}, () => fn(transporter, ...args));
   };
 }
